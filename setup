@@ -1,65 +1,113 @@
 #!/bin/bash
 
-# Bu script, önceki kurulumu geri alır.
-# root kullanıcısı olarak çalıştırıldığından emin olun.
+# Ubuntu 20.04 için tüm gerekli paketleri güncelle ve yükle
+sudo apt update && sudo apt upgrade -y
 
-DOMAIN="n1.openssh.site"
-WEBROOT="/var/www/html"
-NODE_PORT=8880  # Node.js WebSocket sunucu portu
-SSH_PORT=22
-SSH_TLSPort=443
+# Gerekli yazılımları yükle
+sudo apt install -y nginx certbot python3-certbot-nginx curl stunnel4 nodejs npm
 
-# 1. Node.js WebSocket servisini durdur ve kaldır
-echo "Node.js WebSocket servisini durduruyor ve kaldırıyoruz..."
-sudo systemctl stop websocket-server
-sudo systemctl disable websocket-server
-sudo rm -f /etc/systemd/system/websocket-server.service
-sudo rm -rf /var/www/html/websocket-server
+# Nginx'in doğru çalıştığından emin ol
+sudo systemctl enable nginx
+sudo systemctl start nginx
 
-# 2. Let's Encrypt SSL sertifikasını kaldır
-echo "Let's Encrypt SSL sertifikasını kaldırıyoruz..."
-sudo certbot delete --cert-name $DOMAIN
+# WebSocket sunucusu kurulumunu yap
+mkdir -p /opt/websocket-server
+cd /opt/websocket-server
+npm init -y
+npm install ws
 
-# 3. Nginx yapılandırmasını geri al ve Nginx servisini durdur
-echo "Nginx yapılandırmasını kaldırıyoruz..."
-sudo rm -f /etc/nginx/sites-available/$DOMAIN
-sudo rm -f /etc/nginx/sites-enabled/$DOMAIN
-sudo nginx -t
-sudo systemctl restart nginx
+# WebSocket server için basit bir uygulama oluştur
+cat <<EOF > /opt/websocket-server/server.js
+const WebSocket = require('ws');
+const wss = new WebSocket.Server({ port: 8880 });
 
-# 4. Stunnel SSH-TLS yapılandırmasını ve servisini kaldır
-echo "Stunnel SSH-TLS yapılandırmasını kaldırıyoruz..."
-sudo rm -f /etc/stunnel/ssh-tls.conf
-sudo systemctl stop stunnel4
-sudo systemctl disable stunnel4
+wss.on('connection', ws => {
+  ws.on('message', message => {
+    console.log('received: %s', message);
+  });
+  ws.send('Hello! Message from server.');
+});
+EOF
 
-# 5. SSH yapılandırmasını eski haline getir
-echo "SSH yapılandırmasını geri alıyoruz..."
-sudo sed -i 's/Port 22/#Port 22/' /etc/ssh/sshd_config
-sudo sed -i 's/PermitRootLogin yes/#PermitRootLogin yes/' /etc/ssh/sshd_config
-sudo systemctl restart sshd
+# WebSocket sunucusunu arka planda çalıştır
+nohup node /opt/websocket-server/server.js &
 
-# 6. Nginx ve gerekli paketleri kaldır
-echo "Nginx ve gerekli paketleri kaldırıyoruz..."
-sudo apt remove --purge -y nginx nginx-common nginx-core
-sudo apt remove --purge -y certbot python3-certbot-nginx nodejs npm
-sudo apt autoremove -y
+# stunnel yapılandırması
+# WebSocket-TLS ve SSH-TLS için yapılandırmalar
+cat <<EOF | sudo tee /etc/stunnel/stunnel.conf
+pid = /var/run/stunnel.pid
+output = /var/log/stunnel.log
 
-# 7. Stunnel ve ilgili paketleri kaldır
-echo "Stunnel paketlerini kaldırıyoruz..."
-sudo apt remove --purge -y stunnel4
-sudo apt autoremove -y
+[ssh-tls]
+accept = 0.0.0.0:443
+connect = 127.0.0.1:22  # SSH bağlantısı
 
-# 8. Firewall yapılandırmasını sıfırla
-echo "Firewall yapılandırmasını sıfırlıyoruz..."
-sudo ufw delete allow 22/tcp
-sudo ufw delete allow 443/tcp
-sudo ufw delete allow OpenSSH
-sudo ufw reload
+[websocket-tls]
+accept = 0.0.0.0:443
+connect = 127.0.0.1:8880  # WebSocket sunucu bağlantısı
+EOF
 
-# 9. Uygulama servisi ve dosya izinlerini temizle
-echo "Sistem temizliği yapılıyor..."
-sudo rm -rf /etc/systemd/system/websocket-server.service
-sudo rm -rf /var/www/html/websocket-server
+# stunnel başlatma
+sudo systemctl enable stunnel4
+sudo systemctl start stunnel4
 
-echo "Geri alma işlemi başarıyla tamamlandı!"
+# Let's Encrypt için domain doğrulaması ve SSL sertifikası al
+domain="n1.openssh.site"
+sudo certbot --nginx -d $domain
+
+# Nginx yapılandırma dosyasını düzenleyelim
+cat <<EOF | sudo tee /etc/nginx/sites-available/$domain
+server {
+    listen 80;
+    server_name $domain;
+
+    location /ws {
+        proxy_pass http://127.0.0.1:8880/;
+        proxy_redirect off;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_read_timeout 52w;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name $domain;
+
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+
+    location /ws {
+        if (\$http_upgrade != "websocket") {
+            return 404;
+        }
+        proxy_pass http://127.0.0.1:8880;
+        proxy_redirect off;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_read_timeout 52w;
+    }
+}
+EOF
+
+# Nginx'i etkinleştir ve yeniden başlat
+sudo ln -s /etc/nginx/sites-available/$domain /etc/nginx/sites-enabled/
+sudo systemctl reload nginx
+
+# Firewall yapılandırması (80 ve 443 portlarını aç)
+sudo ufw allow 'Nginx Full'
+
+# SSL sertifikasının süresini yenilemek için cron job oluştur
+echo "0 0 * * * certbot renew --quiet" | sudo tee -a /etc/crontab > /dev/null
+
+echo "Kurulum tamamlandı! SSH-TLS ve WebSocket-TLS çalışmaya başladı. Nginx üzerinden SSL sertifikası alındı ve WebSocket ile güvenli bağlantı sağlanıyor."

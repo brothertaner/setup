@@ -1,7 +1,35 @@
 #!/bin/bash
 
+# sources.list dosyasını sil ve yeniden oluştur
+echo "sources.list dosyası siliniyor ve yeniden oluşturuluyor..."
+
+# sources.list dosyasını sil
+sudo rm -f /etc/apt/sources.list
+
+# Yeni sources.list dosyasını oluştur
+cat <<EOF | sudo tee /etc/apt/sources.list
+# Ubuntu 20.04 Ana Depoları
+deb http://archive.ubuntu.com/ubuntu/ focal main restricted universe multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ focal main restricted universe multiverse
+
+# Ubuntu 20.04 Güncelleme Depoları
+deb http://security.ubuntu.com/ubuntu/ focal-security main restricted universe multiverse
+deb-src http://security.ubuntu.com/ubuntu/ focal-security main restricted universe multiverse
+
+# Ubuntu 20.04 Güncelleme ve Önerilen Paketler
+deb http://archive.ubuntu.com/ubuntu/ focal-updates main restricted universe multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ focal-updates main restricted universe multiverse
+
+# Ubuntu 20.04 Kaynak Depoları
+deb http://archive.ubuntu.com/ubuntu/ focal-backports main restricted universe multiverse
+deb-src http://archive.ubuntu.com/ubuntu/ focal-backports main restricted universe multiverse
+EOF
+
+# Depoları güncelleme
+sudo apt update -y
+
 # Ubuntu 20.04 için tüm gerekli paketleri güncelle ve yükle
-sudo apt update && sudo apt upgrade -y
+sudo apt upgrade -y
 
 # Gerekli yazılımları yükle
 sudo apt install -y nginx certbot python3-certbot-nginx curl stunnel4 nodejs npm
@@ -32,11 +60,15 @@ EOF
 # WebSocket sunucusunu arka planda çalıştır
 nohup node /opt/websocket-server/server.js &
 
-# stunnel yapılandırması
+# stunnel yapılandırması (domain yolu eklenmiş)
 # WebSocket-TLS ve SSH-TLS için yapılandırmalar
+domain="n1.openssh.site"
 cat <<EOF | sudo tee /etc/stunnel/stunnel.conf
 pid = /var/run/stunnel.pid
 output = /var/log/stunnel.log
+
+cert = /etc/letsencrypt/live/$domain/fullchain.pem
+key = /etc/letsencrypt/live/$domain/privkey.pem
 
 [ssh-tls]
 accept = 0.0.0.0:443
@@ -52,7 +84,6 @@ sudo systemctl enable stunnel4
 sudo systemctl start stunnel4
 
 # Let's Encrypt için domain doğrulaması ve SSL sertifikası al
-domain="n1.openssh.site"
 sudo certbot --nginx -d $domain
 
 # Nginx yapılandırma dosyasını düzenleyelim
@@ -110,4 +141,4 @@ sudo ufw allow 'Nginx Full'
 # SSL sertifikasının süresini yenilemek için cron job oluştur
 echo "0 0 * * * certbot renew --quiet" | sudo tee -a /etc/crontab > /dev/null
 
-echo "Kurulum tamamlandı! SSH-TLS ve WebSocket-TLS çalışmaya başladı. Nginx üzerinden SSL sertifikası alındı ve WebSocket ile güvenli bağlantı sağlanıyor."
+echo "Kurulum tamamlandı! WebSocket-TLS ve SSH-TLS çalışmaya başladı. Nginx üzerinden SSL sertifikası alındı ve WebSocket ile güvenli bağlantı sağlanıyor. Ayrıca sources.list dosyası güncellendi."

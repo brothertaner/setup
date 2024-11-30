@@ -1,143 +1,65 @@
 #!/bin/bash
 
-# Bu script, Nginx, Let's Encrypt, SSH-TLS ve Node.js WebSocket kurulumu için tasarlanmıştır.
+# Bu script, önceki kurulumu geri alır.
 # root kullanıcısı olarak çalıştırıldığından emin olun.
-# script'i şu şekilde çalıştırın: sudo bash setup.sh
 
 DOMAIN="n1.openssh.site"
 WEBROOT="/var/www/html"
+NODE_PORT=8880  # Node.js WebSocket sunucu portu
 SSH_PORT=22
 SSH_TLSPort=443
-NODE_PORT=8880  # Node.js WebSocket sunucu portu
 
-# 1. Nginx ve gerekli paketlerin kurulumu
-echo "Nginx ve gerekli paketlerin kurulumu başlatılıyor..."
-sudo apt update
-sudo apt install -y nginx curl wget software-properties-common certbot python3-certbot-nginx nodejs npm
+# 1. Node.js WebSocket servisini durdur ve kaldır
+echo "Node.js WebSocket servisini durduruyor ve kaldırıyoruz..."
+sudo systemctl stop websocket-server
+sudo systemctl disable websocket-server
+sudo rm -f /etc/systemd/system/websocket-server.service
+sudo rm -rf /var/www/html/websocket-server
 
-# 2. Node.js WebSocket sunucusunun kurulumu
-echo "Node.js WebSocket sunucusunun kurulumu başlatılıyor..."
-# WebSocket sunucusu için Node.js uygulamasını kuruyoruz
-mkdir -p /var/www/html/websocket-server
-cd /var/www/html/websocket-server
+# 2. Let's Encrypt SSL sertifikasını kaldır
+echo "Let's Encrypt SSL sertifikasını kaldırıyoruz..."
+sudo certbot delete --cert-name $DOMAIN
 
-# Yeni bir Node.js proje başlatıyoruz
-npm init -y
-npm install ws
-
-# WebSocket sunucusu için temel bir Node.js uygulaması oluşturuyoruz
-cat > /var/www/html/websocket-server/server.js <<EOF
-const WebSocket = require('ws');
-const wss = new WebSocket.Server({ port: $NODE_PORT });
-
-wss.on('connection', (ws) => {
-    console.log('Yeni WebSocket bağlantısı');
-    ws.on('message', (message) => {
-        console.log('Mesaj alındı: %s', message);
-    });
-
-    ws.send('Hoş geldiniz!');
-});
-EOF
-
-# 3. Node.js WebSocket sunucusunu arka planda çalıştıracak bir servis oluşturuyoruz
-cat > /etc/systemd/system/websocket-server.service <<EOF
-[Unit]
-Description=Node.js WebSocket Server
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/node /var/www/html/websocket-server/server.js
-WorkingDirectory=/var/www/html/websocket-server
-Restart=always
-User=www-data
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 4. Node.js WebSocket sunucusunu başlatıyoruz
-sudo systemctl daemon-reload
-sudo systemctl enable websocket-server
-sudo systemctl start websocket-server
-
-# 5. Let's Encrypt SSL sertifikası almak
-echo "Let's Encrypt SSL sertifikası almak için sertifika doğrulaması başlatılıyor..."
-sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email admin@$DOMAIN
-
-# 6. Nginx WebSocket yapılandırması ve SSL
-echo "Nginx yapılandırması başlatılıyor..."
-cat > /etc/nginx/sites-available/$DOMAIN <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-
-    location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-    }
-
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
-
-server {
-    listen 443 ssl;
-    server_name $DOMAIN;
-
-    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
-
-    location /ws {
-        proxy_pass http://127.0.0.1:$NODE_PORT/;
-        proxy_redirect off;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_read_timeout 52w;
-    }
-}
-EOF
-
-# 7. Nginx'i yeniden başlatıyoruz
-sudo ln -s /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/
+# 3. Nginx yapılandırmasını geri al ve Nginx servisini durdur
+echo "Nginx yapılandırmasını kaldırıyoruz..."
+sudo rm -f /etc/nginx/sites-available/$DOMAIN
+sudo rm -f /etc/nginx/sites-enabled/$DOMAIN
 sudo nginx -t
 sudo systemctl restart nginx
 
-# 8. SSH-TLS için Stunnel kurulumu
-echo "SSH-TLS yapılandırması başlatılıyor..."
-sudo apt install -y stunnel4
+# 4. Stunnel SSH-TLS yapılandırmasını ve servisini kaldır
+echo "Stunnel SSH-TLS yapılandırmasını kaldırıyoruz..."
+sudo rm -f /etc/stunnel/ssh-tls.conf
+sudo systemctl stop stunnel4
+sudo systemctl disable stunnel4
 
-# Stunnel yapılandırmasını oluşturma
-cat > /etc/stunnel/ssh-tls.conf <<EOF
-cert = /etc/letsencrypt/live/$DOMAIN/fullchain.pem
-key = /etc/letsencrypt/live/$DOMAIN/privkey.pem
-client = no
-[ssh-tls]
-accept = $SSH_TLSPort
-connect = 127.0.0.1:$SSH_PORT
-EOF
-
-# 9. Stunnel servisini başlatma
-sudo systemctl enable stunnel4
-sudo systemctl restart stunnel4
-
-# 10. SSH servisinin yapılandırması
-echo "SSH yapılandırması başlatılıyor..."
-sudo sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config
-sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+# 5. SSH yapılandırmasını eski haline getir
+echo "SSH yapılandırmasını geri alıyoruz..."
+sudo sed -i 's/Port 22/#Port 22/' /etc/ssh/sshd_config
+sudo sed -i 's/PermitRootLogin yes/#PermitRootLogin yes/' /etc/ssh/sshd_config
 sudo systemctl restart sshd
 
-# 11. Firewall yapılandırması (Gerekirse)
-echo "Firewall yapılandırması başlatılıyor..."
-sudo ufw allow 22/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow OpenSSH
-sudo ufw enable
+# 6. Nginx ve gerekli paketleri kaldır
+echo "Nginx ve gerekli paketleri kaldırıyoruz..."
+sudo apt remove --purge -y nginx nginx-common nginx-core
+sudo apt remove --purge -y certbot python3-certbot-nginx nodejs npm
+sudo apt autoremove -y
 
-echo "Kurulum tamamlandı! Nginx, Let's Encrypt SSL, SSH-TLS ve Node.js WebSocket başarıyla yapılandırıldı."
+# 7. Stunnel ve ilgili paketleri kaldır
+echo "Stunnel paketlerini kaldırıyoruz..."
+sudo apt remove --purge -y stunnel4
+sudo apt autoremove -y
+
+# 8. Firewall yapılandırmasını sıfırla
+echo "Firewall yapılandırmasını sıfırlıyoruz..."
+sudo ufw delete allow 22/tcp
+sudo ufw delete allow 443/tcp
+sudo ufw delete allow OpenSSH
+sudo ufw reload
+
+# 9. Uygulama servisi ve dosya izinlerini temizle
+echo "Sistem temizliği yapılıyor..."
+sudo rm -rf /etc/systemd/system/websocket-server.service
+sudo rm -rf /var/www/html/websocket-server
+
+echo "Geri alma işlemi başarıyla tamamlandı!"
